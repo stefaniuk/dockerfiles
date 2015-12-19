@@ -1,0 +1,7 @@
+#!/bin/bash
+set -e
+
+exec setuser postgres ${POSTGRESQL_BINDIR}/postgres \
+    -D ${POSTGRESQL_DATADIR} \
+    -c config_file=${POSTGRESQL_CONFDIR}/postgresql.conf \
+    > /dev/null 2>&1

@@ -1,0 +1,134 @@
+#!/bin/bash
+set -e
+
+if [ -n "${USERMAP_UID}" ] || [ -n "${USERMAP_GID}" ]; then
+  if [ -n "${USERMAP_UID}" ] && [ -n "${USERMAP_GID}" ]; then
+    groupmod -g ${USERMAP_GID} postgres
+    usermod -u ${USERMAP_UID} -g ${USERMAP_GID} postgres
+  else
+    echo ""
+    echo "WARNING: "
+    echo "  Please specify USERMAP_UID AND USERMAP_GID or neither. Not changing user id..."
+    echo ""
+  fi
+fi
+
+# set this env variable to true to enable a line in the
+# pg_hba.conf file to trust samenet.  this can be used to connect
+# from other containers on the same host without authentication
+PSQL_TRUST_LOCALNET=${PSQL_TRUST_LOCALNET:false}
+
+DB_NAME=${DB_NAME:-}
+DB_USER=${DB_USER:-}
+DB_PASS=${DB_PASS:-}
+DB_UNACCENT=${DB_UNACCENT:false}
+
+# fix ownership of ${POSTGRESQL_CONFDIR} (may be necessary if USERMAP_* was set)
+chown -R postgres:postgres ${POSTGRESQL_CONFDIR}
+
+# fix permissions and ownership of ${POSTGRESQL_HOME}
+mkdir -p -m 0700 ${POSTGRESQL_HOME}
+chown -R postgres:postgres ${POSTGRESQL_HOME}
+
+# fix permissions and ownership of /run/postgresql
+mkdir -p -m 0755 /run/postgresql /run/postgresql/${POSTGRESQL_VER}-main.pg_stat_tmp
+chown -R postgres:postgres /run/postgresql
+chmod g+s /run/postgresql
+
+# disable ssl
+sed "s/ssl = true/#ssl = true/" -i ${POSTGRESQL_CONFDIR}/postgresql.conf
+# listen on all interfaces
+sed "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" -i ${POSTGRESQL_CONFDIR}/postgresql.conf
+# syslog
+sed "s/#log_destination = 'stderr'/log_destination = 'syslog'/" -i ${POSTGRESQL_CONFDIR}/postgresql.conf
+sed "s/#syslog_facility = 'LOCAL0'/syslog_facility = 'LOCAL0'/" -i ${POSTGRESQL_CONFDIR}/postgresql.conf
+sed "s/#syslog_ident = 'postgres'/syslog_ident = 'postgres'/" -i ${POSTGRESQL_CONFDIR}/postgresql.conf
+
+if [ "${PSQL_TRUST_LOCALNET}" == "true" ]; then
+  echo "Enabling trust samenet in pg_hba.conf..."
+  cat >> ${POSTGRESQL_CONFDIR}/pg_hba.conf <<EOF
+host    all             all             samenet                 trust
+EOF
+fi
+
+# allow remote connections to postgresql database
+cat >> ${POSTGRESQL_CONFDIR}/pg_hba.conf <<EOF
+host    all             all             0.0.0.0/0               md5
+EOF
+
+cd ${POSTGRESQL_HOME}
+
+# initialize PostgreSQL data directory
+if [ ! -d ${POSTGRESQL_DATADIR} ]; then
+  # check if we need to perform data migration
+  PG_OLD_VERSION=$(find ${POSTGRESQL_HOME}/[0-9].[0-9]/main -maxdepth 1 -name POSTGRESQL_VER 2>/dev/null | sort -r | head -n1 | cut -d'/' -f5)
+
+  echo "Initializing database..."
+  sudo -u postgres -H "${POSTGRESQL_BINDIR}/initdb" --pgdata="${POSTGRESQL_DATADIR}" \
+    --username=postgres --encoding=unicode --auth=trust >/dev/null
+fi
+
+if [ -n "${PG_OLD_VERSION}" ]; then
+  echo "Migrating postgresql ${PG_OLD_VERSION} data..."
+  PG_OLD_CONFDIR="/etc/postgresql/${PG_OLD_VERSION}/main"
+  PG_OLD_BINDIR="/usr/lib/postgresql/${PG_OLD_VERSION}/bin"
+  PG_OLD_DATADIR="${POSTGRESQL_HOME}/${PG_OLD_VERSION}/main"
+
+  # backup ${PG_OLD_DATADIR} to avoid data loss
+  PG_BKP_SUFFIX=$(date +%Y%m%d%H%M%S)
+  echo "Backing up ${PG_OLD_DATADIR} to ${PG_OLD_DATADIR}.${PG_BKP_SUFFIX}..."
+  cp -a ${PG_OLD_DATADIR} ${PG_OLD_DATADIR}.${PG_BKP_SUFFIX}
+
+  echo "Installing postgresql-${PG_OLD_VERSION}..."
+  apt-get update
+  apt-get install postgresql-${PG_OLD_VERSION} postgresql-client-${PG_OLD_VERSION}
+  rm -rf /var/lib/apt/lists/*
+
+  # migrate ${PG_OLD_VERSION} data
+  echo "Migration in progress. This could take a while, please be patient..."
+  sudo -u postgres -H ${POSTGRESQL_BINDIR}/pg_upgrade \
+    -b ${PG_OLD_BINDIR} -B ${POSTGRESQL_BINDIR} \
+    -d ${PG_OLD_DATADIR} -D ${POSTGRESQL_DATADIR} \
+    -o "-c config_file=${PG_OLD_CONFDIR}/postgresql.conf" \
+    -O "-c config_file=${POSTGRESQL_CONFDIR}/postgresql.conf" >/dev/null
+fi
+
+if [ -n "${DB_USER}" ]; then
+  if [ -z "${DB_PASS}" ]; then
+    echo ""
+    echo "WARNING: "
+    echo "  Please specify a password for \"${DB_USER}\". Skipping user creation..."
+    echo ""
+    DB_USER=
+  else
+    echo "Creating user \"${DB_USER}\"..."
+    echo "CREATE ROLE ${DB_USER} with LOGIN CREATEDB PASSWORD '${DB_PASS}';" |
+      sudo -u postgres -H ${POSTGRESQL_BINDIR}/postgres --single \
+        -D ${POSTGRESQL_DATADIR} -c config_file=${POSTGRESQL_CONFDIR}/postgresql.conf >/dev/null
+  fi
+fi
+
+if [ -n "${DB_NAME}" ]; then
+  for db in $(awk -F',' '{for (i = 1 ; i <= NF ; i++) print $i}' <<< "${DB_NAME}"); do
+    echo "Creating database \"${db}\"..."
+    echo "CREATE DATABASE ${db};" | \
+      sudo -u postgres -H ${POSTGRESQL_BINDIR}/postgres --single \
+        -D ${POSTGRESQL_DATADIR} -c config_file=${POSTGRESQL_CONFDIR}/postgresql.conf >/dev/null
+
+    if [ "${DB_UNACCENT}" == "true" ]; then
+      echo "Installing unaccent extension..."
+      echo "CREATE EXTENSION IF NOT EXISTS unaccent;" | \
+        sudo -u postgres -H ${POSTGRESQL_BINDIR}/postgres --single ${db} \
+          -D ${POSTGRESQL_DATADIR} -c config_file=${POSTGRESQL_CONFDIR}/postgresql.conf >/dev/null
+    fi
+
+    if [ -n "${DB_USER}" ]; then
+      echo "Granting access to database \"${db}\" for user \"${DB_USER}\"..."
+      echo "GRANT ALL PRIVILEGES ON DATABASE ${db} to ${DB_USER};" |
+        sudo -u postgres -H ${POSTGRESQL_BINDIR}/postgres --single \
+          -D ${POSTGRESQL_DATADIR} -c config_file=${POSTGRESQL_CONFDIR}/postgresql.conf >/dev/null
+    fi
+  done
+fi
+
+exit 0

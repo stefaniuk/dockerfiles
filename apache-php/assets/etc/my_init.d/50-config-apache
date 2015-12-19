@@ -1,0 +1,31 @@
+#!/bin/bash
+set -e
+
+# update configuration files
+if ! cat /etc/apache2/apache2.conf | grep ^ServerName > /dev/null; then
+    echo "ServerName ${APACHE_SERVERNAME}" >> /etc/apache2/apache2.conf
+fi
+sed -i "s/\;date\.timezone\ \=/date\.timezone\ \=\ Europe\/London/g" /etc/php5/cli/php.ini
+sed -i "s/\;date\.timezone\ \=/date\.timezone\ \=\ Europe\/London/g" /etc/php5/apache2/php.ini
+sed -ri "s/^display_errors\s*=\s*Off/display_errors = On/g" /etc/php5/cli/php.ini
+sed -ri "s/^display_errors\s*=\s*Off/display_errors = On/g" /etc/php5/apache2/php.ini
+
+# generate SSL certificate
+mkdir -p /etc/apache2/ssl
+file="/etc/apache2/ssl/${APACHE_SERVERNAME}"
+if [ ! -f $file.crt ] || [ ! -f $file.key ]; then
+    openssl req \
+        -new -x509 -nodes -sha1 \
+        -newkey rsa:2048 \
+        -days 365 \
+        -subj "/O=${APACHE_SERVERNAME}/OU=${APACHE_SERVERNAME}/CN=${APACHE_SERVERNAME}" \
+        -out $file.crt \
+        -keyout $file.key \
+        > /dev/null 2>&1
+    cat $file.crt $file.key > $file.pem
+fi
+
+# enable virtual host
+ln -sf /etc/apache2/sites-available/000-default.conf /etc/apache2/sites-enabled/
+
+exit 0

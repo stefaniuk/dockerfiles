@@ -1,0 +1,13 @@
+#!/bin/bash
+set -e
+
+# unset build-time environment variables
+rm -f /etc/container_environment/BUILD_APT_PROXY
+
+if [ -n "$APT_PROXY" ]; then
+    echo "Acquire::http { Proxy \"$APT_PROXY\"; };" > /etc/apt/apt.conf.d/00-proxy
+else
+    rm -f /etc/apt/apt.conf.d/00-proxy
+fi
+
+exit 0

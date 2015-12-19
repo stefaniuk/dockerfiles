@@ -1,0 +1,11 @@
+#!/bin/bash
+
+export LC_ALL=C
+export DEBIAN_FRONTEND=noninteractive
+export FILES=/build/assets
+
+apt_get_update="apt-get --yes update"
+apt_get_upgrade="apt-get --yes --force-yes --ignore-missing --no-install-recommends dist-upgrade"
+apt_get_install="apt-get --yes --force-yes --ignore-missing --no-install-recommends install"
+apt_get_remove="apt-get --yes --force-yes autoremove"
+apt_get_clean="apt-get --yes --force-yes clean"

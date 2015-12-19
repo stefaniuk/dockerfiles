@@ -1,0 +1,8 @@
+#!/bin/bash
+set -e
+
+exec slapd -h "ldap:/// ldapi:///" \
+    -u openldap -g openldap \
+    -l local4 \
+    -d ${SLAPD_DEBUG:-256} \
+    ${SLAPD_OPTS:-}
